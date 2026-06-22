@@ -13,11 +13,13 @@ export default defineBrand({
     supportsPreciseTokenCount: false,
   },
   modelIds: [
+    'GLM-5.2',
     'GLM-5.1',
     'GLM-5-Turbo',
     'GLM-5',
     'GLM-4.7',
     'GLM-4.5-Air',
+    'glm-5.2',
     'glm-5.1',
     'glm-5-turbo',
     'glm-5',

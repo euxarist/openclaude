@@ -43,6 +43,13 @@ let rescheduleCount = 0
 let hasPendingChanges = false
 let currentPushPromise: Promise<void> | null = null
 let watcherStarted = false
+// True when a follow-up push has already been chained onto currentPushPromise
+// via the cap-reschedule path. Prevents unbounded .then() appends while the
+// in-flight push is stuck — without this, every cap cycle during a slow/hung
+// push appends another queued executePush(), so when the first push finally
+// resolves it runs a long series of redundant pushes even after
+// hasPendingChanges has cleared or suppression has been set.
+let followUpQueued = false
 
 // Set after a push fails for a reason that can't self-heal on retry.
 // Prevents watch events from other sessions' writes to the shared team
@@ -127,6 +134,11 @@ async function executePush(): Promise<void> {
     pushInProgress = false
     if (currentPushPromise === capturedPromise) {
       currentPushPromise = null
+      // The follow-up flag tracks "is a .then(executePush) chained onto the
+      // current promise?" When the chain reference is being cleared, the
+      // queued callback has either run or is about to — either way, the
+      // slot is free for a new follow-up to be queued on the next cap cycle.
+      followUpQueued = false
     }
   }
 }
@@ -136,10 +148,33 @@ function onDebounceFire(): void {
     if (rescheduleCount < MAX_RESCHEDULE_ATTEMPTS) {
       rescheduleCount++
       schedulePush()
+    } else if (followUpQueued) {
+      // A follow-up push is already chained onto the in-flight promise.
+      // Appending another would grow the chain unbounded while the first
+      // push is stuck — N cap cycles = N redundant queued pushes, all of
+      // which fire sequentially when the first push resolves even if
+      // hasPendingChanges has cleared or suppression has been set.
+      // Drop this reschedule: the queued follow-up will pick up the
+      // latest hasPendingChanges state when it runs.
+      rescheduleCount = 0
     } else {
       rescheduleCount = 0
+      followUpQueued = true
       currentPushPromise = (currentPushPromise ?? Promise.resolve()).then(
-        () => executePush(),
+        async () => {
+          // Clear the queued flag before running. If executePush runs, its
+          // finally block clears currentPushPromise when identity matches.
+          // If we skip (no pending changes or suppressed), we clear both
+          // here so the next cap cycle can queue a fresh follow-up.
+          followUpQueued = false
+          if (hasPendingChanges && pushSuppressedReason === null) {
+            await executePush()
+          } else if (currentPushPromise !== null) {
+            // Skipped executePush — clear the chain reference ourselves
+            // since executePush's finally won't run.
+            currentPushPromise = null
+          }
+        },
       )
     }
     return
@@ -392,6 +427,7 @@ export function _resetWatcherStateForTesting(opts?: {
   rescheduleCount = 0
   hasPendingChanges = false
   currentPushPromise = null
+  followUpQueued = false
   watcherStarted = opts?.skipWatcher ?? false
   pushSuppressedReason = opts?.pushSuppressedReason ?? null
   syncState = opts?.syncState ?? null
@@ -414,6 +450,7 @@ export const _test = {
   get rescheduleCount(): number { return rescheduleCount },
   get currentPushPromise(): Promise<void> | null { return currentPushPromise },
   set currentPushPromise(v: Promise<void> | null) { currentPushPromise = v },
+  get followUpQueued(): boolean { return followUpQueued },
   get hasPendingChanges(): boolean { return hasPendingChanges },
   schedulePush,
   onDebounceFire,

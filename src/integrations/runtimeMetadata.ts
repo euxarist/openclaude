@@ -186,6 +186,18 @@ function inferRemoteModelOpenAIShimConfig(
     }
   }
 
+  const hasGlm = segments.some(s => s.startsWith('glm'))
+  if (hasGlm) {
+    return {
+      preserveReasoningContent: true,
+      requireReasoningContentOnAssistantMessages: true,
+      reasoningContentFallback: '',
+      thinkingRequestFormat: 'deepseek-compatible',
+      maxTokensField: 'max_tokens',
+      removeBodyFields: ['store'],
+    }
+  }
+
   return undefined
 }
 

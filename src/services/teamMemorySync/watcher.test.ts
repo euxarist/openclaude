@@ -70,6 +70,13 @@ describe('rescheduleCount behavior', () => {
   })
 
   test('capped reschedule chains follow-up push after in-flight push completes', async () => {
+    // P2 fix: drive the actual production path (onDebounceFire with cap
+    // reached) instead of manually chaining .then(executePush). The old
+    // test anchored the chain to Promise.resolve() because executePush
+    // doesn't assign currentPushPromise — so it could pass even if the
+    // production cap path started the follow-up too early. This version
+    // sets currentPushPromise the way schedulePush()/onDebounceFire() do
+    // and asserts the second push cannot start until the first resolves.
     mod = await freshMod()
     let callCount = 0
     let resolveFirst!: (v: unknown) => void
@@ -81,14 +88,27 @@ describe('rescheduleCount behavior', () => {
       return Promise.resolve({ success: true, filesUploaded: 0 })
     })
 
-    const firstPush = mod._test.executePush()
+    // schedulePush sets hasPendingChanges=true the way a real fs.watch
+    // event would before the debounce timer fires onDebounceFire.
+    mod._test.schedulePush()
+
+    // Start the first push via the production entry point.
+    mod._test.onDebounceFire()
+    const firstPush = mod._test.currentPushPromise!
     expect(mod._test.pushInProgress).toBe(true)
-
-    mod._test.currentPushPromise = (mod._test.currentPushPromise ?? Promise.resolve()).then(
-      () => mod._test.executePush(),
-    )
-
     expect(callCount).toBe(1)
+
+    // Simulate MAX_RESCHEDULE_ATTEMPTS debounce fires while the first
+    // push is still in flight, then one more to hit the cap path.
+    for (let i = 0; i < mod._test.MAX_RESCHEDULE_ATTEMPTS; i++) {
+      mod._test.onDebounceFire()
+    }
+    mod._test.onDebounceFire() // cap reached → follow-up chained
+
+    // Follow-up is queued but must NOT have started yet — the first push
+    // is still in flight. This is the assertion the old test couldn't make.
+    expect(callCount).toBe(1)
+    expect(mod._test.followUpQueued).toBe(true)
 
     resolveFirst({ success: true, filesUploaded: 0 })
     await firstPush
@@ -96,6 +116,100 @@ describe('rescheduleCount behavior', () => {
 
     expect(mod._test.pushInProgress).toBe(false)
     expect(callCount).toBe(2)
+    expect(mod._test.followUpQueued).toBe(false)
+  })
+
+  test('P1: cap reached multiple times during stuck push queues only one follow-up', async () => {
+    // Regression: with continuous writes and a slow/hung first push, the
+    // debounce can hit the cap repeatedly and append another follow-up
+    // every cap cycle. When the first push finally resolves it runs a
+    // long series of redundant pushes. The followUpQueued flag prevents
+    // duplicate appends while the same in-flight push is outstanding.
+    mod = await freshMod()
+    let callCount = 0
+    let resolveFirst!: (v: unknown) => void
+    mockPush.mockImplementation(() => {
+      callCount++
+      if (callCount === 1) {
+        return new Promise(resolve => { resolveFirst = resolve })
+      }
+      return Promise.resolve({ success: true, filesUploaded: 0 })
+    })
+
+    mod._test.schedulePush() // sets hasPendingChanges=true
+    mod._test.onDebounceFire() // first push starts
+    expect(callCount).toBe(1)
+
+    // Hit the cap path N times while the first push is stuck.
+    for (let i = 0; i < 6; i++) {
+      for (let j = 0; j < mod._test.MAX_RESCHEDULE_ATTEMPTS; j++) {
+        mod._test.onDebounceFire()
+      }
+      mod._test.onDebounceFire() // cap reached
+    }
+
+    // Only one follow-up should be queued, not six.
+    expect(mod._test.followUpQueued).toBe(true)
+    expect(callCount).toBe(1)
+
+    resolveFirst({ success: true, filesUploaded: 0 })
+    await mod._test.currentPushPromise
+
+    // Only the first push and the single queued follow-up ran — no
+    // redundant follow-ups from the extra cap cycles.
+    expect(callCount).toBe(2)
+    expect(mod._test.followUpQueued).toBe(false)
+  })
+
+  test('P1: queued follow-up skips executePush when hasPendingChanges is false', async () => {
+    // Guard against the queued callback firing after conditions changed:
+    // if hasPendingChanges cleared (e.g. another path already pushed),
+    // the follow-up should skip the redundant network call.
+    mod = await freshMod()
+    let callCount = 0
+    let resolveFirst!: (v: unknown) => void
+    mockPush.mockImplementation(() => {
+      callCount++
+      if (callCount === 1) {
+        return new Promise(resolve => { resolveFirst = resolve })
+      }
+      return Promise.resolve({ success: true, filesUploaded: 0 })
+    })
+
+    // Don't call schedulePush — hasPendingChanges stays false, modeling
+    // the case where the first push already cleared it.
+    mod._test.onDebounceFire() // first push starts
+    expect(callCount).toBe(1)
+
+    // Hit cap path to queue a follow-up.
+    for (let i = 0; i < mod._test.MAX_RESCHEDULE_ATTEMPTS; i++) {
+      mod._test.onDebounceFire()
+    }
+    mod._test.onDebounceFire()
+    expect(mod._test.followUpQueued).toBe(true)
+
+    resolveFirst({ success: true, filesUploaded: 0 })
+    await mod._test.currentPushPromise
+
+    // Follow-up skipped — only the first push ran.
+    expect(callCount).toBe(1)
+    expect(mod._test.followUpQueued).toBe(false)
+    expect(mod._test.currentPushPromise).toBeNull()
+  })
+
+  test('P1: followUpQueued flag resets when first push completes without cap', async () => {
+    // Sanity: if no follow-up was queued, the flag stays false through a
+    // normal push lifecycle. Guards against the flag getting stuck true
+    // via some other path.
+    mod = await freshMod()
+    immediatePush()
+
+    mod._test.schedulePush()
+    mod._test.onDebounceFire()
+    await mod._test.currentPushPromise
+
+    expect(mod._test.followUpQueued).toBe(false)
+    expect(mod._test.currentPushPromise).toBeNull()
   })
 })
 

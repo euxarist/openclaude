@@ -45,6 +45,12 @@ export default defineVendor({
     source: 'static',
     models: [
       {
+        id: 'GLM-5.2',
+        apiName: 'GLM-5.2',
+        label: 'GLM-5.2',
+        modelDescriptorId: 'GLM-5.2',
+      },
+      {
         id: 'GLM-5.1',
         apiName: 'GLM-5.1',
         label: 'GLM-5.1',
