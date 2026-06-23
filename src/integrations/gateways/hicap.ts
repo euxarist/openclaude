@@ -57,6 +57,12 @@ export default defineGateway({
     allowManualRefresh: true,
     models: [
       {
+        id: 'hicap-claude-opus-4.8',
+        apiName: 'claude-opus-4.8',
+        label: 'Claude Opus 4.8',
+        modelDescriptorId: 'claude-opus-4-8',
+      },
+      {
         id: 'hicap-claude-opus-4.7',
         apiName: 'claude-opus-4.7',
         label: 'Claude Opus 4.7',
